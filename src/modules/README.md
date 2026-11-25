@@ -10,12 +10,18 @@ T-01 solo se crea esta guía: los módulos se añaden en sus tareas respectivas
 ```
 modules/<modulo>/
 ├── domain/                 # Entidades y reglas de negocio (sin NestJS, ORM ni SDKs)
-├── use-cases/              # Casos de uso: orquestan las reglas del dominio
+├── application/            # Casos de uso: orquestan las reglas del dominio
+│                           # (equivale a la capa "use-cases" descrita más abajo)
 ├── adapters/
 │   ├── in/                 # Adaptadores de entrada: controladores REST y WebSocket
-│   └── out/                # Adaptadores de salida: base de datos, pagos, mapas, FCM
+│   └── out/ o infrastructure/  # Adaptadores de salida: base de datos, pagos, mapas, FCM
 └── <modulo>.module.ts      # Cableado de dependencias del módulo
 ```
+
+El módulo `companies` (T-03) es la primera implementación de este patrón:
+`src/modules/companies/`. Los puertos se definen como interfaces en
+`domain/` y se enlazan en el módulo con tokens de inyección (porque las
+interfaces de TypeScript no existen en tiempo de ejecución).
 
 - Las dependencias apuntan **hacia el dominio**. El dominio no importa NestJS,
   el ORM ni ningún SDK externo.

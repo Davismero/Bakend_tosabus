@@ -1,10 +1,13 @@
 # TosaBus API (backend)
 
 API REST de TosaBus: monolito modular con NestJS, TypeScript estricto y
-PostgreSQL. Esta entrega corresponde a **T-01: crear la estructura del
-repositorio y el entorno con Docker y PostgreSQL** y cubre **RNF-13**
-(despliegue reproducible con Docker siguiendo esta guía). Todavía no hay
-módulos de negocio: se agregan desde T-03 en adelante.
+PostgreSQL. La base del repositorio y el entorno son de **T-01 (RNF-13)**.
+Esta rama añade el módulo `companies` de **T-03: modelo de compañías y
+aislamiento de datos por compañía**, que cubre **RF-38, RF-39 y RF-40**.
+
+T-04 (registro de usuarios) y T-05 (login JWT) aún no están implementados:
+el guard decodifica y verifica un JWT existente, pero la emisión del token
+llega en T-05.
 
 ## Requisitos
 
@@ -90,16 +93,118 @@ docker compose exec db psql -U tosabus -d tosabus
 ```
 
 Desde el host: `psql "postgresql://tosabus:tosabus@localhost:5432/tosabus"` con
-los valores definidos en `.env`. Configuración de RLS por compañía y acceso
-desde la API llegan con el módulo `companies` (T-03, RF-40).
+los valores definidos en `.env`.
 
-## Migraciones y datos de ejemplo
+## Módulo companies (T-03)
 
-**Pendiente de tareas futuras.** En T-01 no hay esquema de base de datos,
-herramienta de migraciones ni carga de datos. La definición del esquema, las
-migraciones y el aislamiento por compañía se introducen con los módulos de
-negocio (desde T-03); los datos de ejemplo ficticios y verosímiles se agregan
-en T-41. No se usan datos de personas reales ni cobros reales.
+Cubre **RF-38** (alta, administración y desactivación de compañías por el
+superadministrador), **RF-39** (configuración propia de tarifas, políticas y
+marca) y **RF-40** (aislamiento de datos entre compañías).
+
+### Estructura
+
+```
+src/modules/companies/
+├── domain/                    # Compañía + reglas puras (sin NestJS ni ORM)
+│   ├── compania.entity.ts
+│   ├── configuracion-compania.ts
+│   └── company.repository.ts  # puerto del repositorio
+├── application/               # casos de uso (sin frameworks)
+│   ├── crear-compania.use-case.ts
+│   ├── desactivar-compania.use-case.ts
+│   ├── actualizar-configuracion.use-case.ts
+│   ├── obtener-compania.use-case.ts
+│   ├── contexto-seguridad.ts
+│   └── *.spec.ts              # dobles de prueba en repositorio-memoria.ts
+├── adapters/in/               # controlador REST, DTOs y Swagger
+│   ├── companies.controller.ts
+│   └── dto.ts
+├── infrastructure/            # adaptadores de salida
+│   ├── database.ts            # puerto Database + adaptador pg (Pool)
+│   ├── postgres-company.repository.ts
+│   ├── company-context.ts     # JWT -> companyId (CompanyGuard)
+│   ├── super-admin.guard.ts
+│   ├── tokens.ts              # tokens de inyección de los puertos
+│   ├── migrate.ts             # npm run db:migrate
+│   └── migrations/001_companias_rls.sql
+└── companies.module.ts
+```
+
+### Tablas y Row Level Security
+
+La migración `001_companias_rls.sql` crea:
+
+| Tabla | Columnas relevantes | Propósito |
+|---|---|---|
+| `companias` | `id uuid`, `nombre`, `slug` único, `administrador_id`, `activa bool`, `configuracion jsonb`, `created_at` | Compañías y su configuración (RF-38, RF-39). |
+| `ejemplo_tenant` | `id uuid`, `company_id uuid` (FK), `descripcion` | Tabla de ejemplo para demostrar RF-40. |
+
+Ambas tablas tienen `ROW LEVEL SECURITY` y `FORCE ROW LEVEL SECURITY`. Las
+políticas usan `current_setting('app.company_id', true)` y
+`current_setting('app.es_superadmin', true)`:
+
+- Sin contexto → el usuario de la API no ve ninguna fila.
+- Token de la compañía A → ve y modifica solo sus filas.
+- Token de superadministrador (`app.es_superadmin = 'true'`) → ve todas.
+
+**Aplicar la migración:**
+
+```bash
+# DATABASE_URL se lee del entorno (o del .env si se carga antes)
+$env:DATABASE_URL='postgresql://tosabus:tosabus@localhost:5432/tosabus'  # PowerShell
+npm.cmd run db:migrate
+```
+
+Nota de entorno local: el rol `tosabus` debe tener `CREATE` en el esquema
+`public`. En una instalación portable donde `public` pertenece a
+`pg_database_owner`, un administrador puede otorgarlo con:
+`GRANT CREATE ON SCHEMA public TO tosabus;` (no se hace desde el código).
+Los superusuarios de PostgreSQL bypassan RLS: las verificaciones de
+aislamiento se hacen con el rol `tosabus`, no con `postgres`.
+
+### Contexto del JWT y aislamiento (RF-40)
+
+`CompanyContext` lee la cabecera `Authorization: Bearer <token>`, verifica la
+firma con `JWT_SECRET` y extrae `companyId` y `rol`. Ese `companyId` es la
+única fuente para el filtro de base de datos: nunca se lee del body, query ni
+params. `PgDatabase.conContexto` abre una transacción y aplica:
+
+```sql
+SELECT set_config('app.company_id', $2, true);   -- true = LOCAL a la transacción
+SELECT set_config('app.es_superadmin', 'false', true);
+```
+
+Los casos de uso vuelven a comprobar `puedeAcceder(contexto, id)` antes de
+consultar o modificar, de modo que un token de la compañía A que manipule la
+URL para apuntar a la compañía B recibe `403 Forbidden` (RF-40). En paralelo,
+RLS bloquea la fila aunque el filtro de aplicación se omitiera.
+
+### Endpoints
+
+| Método | Ruta | Permiso | Descripción |
+|---|---|---|---|
+| `POST` | `/api/v1/companies` | superadministrador | Alta de compañía con su administrador (RF-38). |
+| `PATCH` | `/api/v1/companies/:id/desactivar` | superadministrador | Desactivar compañía (RF-38). |
+| `GET` | `/api/v1/companies/:id` | superadministrador o la propia compañía | Consultar compañía (RF-40). |
+| `PATCH` | `/api/v1/companies/:id/configuracion` | administrador de esa compañía | Tarifas, políticas y marca (RF-39). |
+
+Los DTOs se validan con `class-validator` (nested validation) y aparecen en
+Swagger en `/docs` bajo la etiqueta `companies`.
+
+### Datos de ejemplo
+
+No se cargan datos de ejemplo en la migración: los usados para verificar RLS
+son ficticios y se eliminaron después de la prueba. Los datos verosímiles
+definitivos llegan en T-41. No hay datos de tarjeta ni credenciales reales.
+
+## Calidad
+
+```bash
+npm.cmd run lint     # ESLint (TypeScript estricto, sin any)
+npm.cmd run build    # Compilación a dist/
+npm.cmd run test     # Jest: pruebas unitarias y e2e (sin internet ni BD)
+npm.cmd run format   # Prettier
+```
 
 ## Calidad
 
@@ -121,12 +226,13 @@ src/
 │   ├── api.ts              # Prefijo global compartido
 │   └── env.validation.ts   # Validación de variables de entorno
 └── modules/
-    └── README.md           # Patrón de capas y módulos previstos
+    ├── README.md           # Patrón de capas y módulos previstos
+    └── companies/          # T-03: compañías + aislamiento (RF-38/39/40)
 test/
 ├── setup-env.ts            # Variables ficticias solo para pruebas
 └── app.e2e-spec.ts         # Prueba e2e del estado de salud
 ```
 
-Los módulos de negocio (`auth`, `companies`, `routes`, `fleet`, `trips`,
-`bookings`, `payments`, `tracking`, `notifications`, `reports`) se crean en sus
-tareas respectivas siguiendo el patrón documentado en `src/modules/README.md`.
+Los demás módulos de negocio (`auth`, `routes`, `fleet`, `trips`, `bookings`,
+`payments`, `tracking`, `notifications`, `reports`) se crean en sus tareas
+respectivas siguiendo el patrón documentado en `src/modules/README.md`.
