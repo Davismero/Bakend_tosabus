@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tosabus-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tosabus}
+      POSTGRES_USER: ${POSTGRES_USER:-tosabus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tosabus}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - tosabus_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tosabus} -d ${POSTGRES_DB:-tosabus}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tosabus-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tosabus}:${POSTGRES_PASSWORD:-tosabus}@db:5432/${POSTGRES_DB:-tosabus}
+      POSTGRES_DB: ${POSTGRES_DB:-tosabus}
+      POSTGRES_USER: ${POSTGRES_USER:-tosabus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tosabus}
+      POSTGRES_PORT: 5432
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:-cambie-este-valor-por-un-secreto-largo-en-produccion-123456}
+    ports:
+      - '3000:3000'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  tosabus_db_data:
